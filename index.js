@@ -1,12 +1,19 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const fs = require('fs');
 const rateLimiter = require('bottleneck');
 const express = require('express');
 const dotenv = require('dotenv');
+const mongoose = require('mongoose');
 
 dotenv.config();
 
+mongoose.connect(process.env.MONGODB_URI);
+mongoose.connection.on('connected', () => {
+    console.log('Connected to MongoDB');
+});
+mongoose.connection.on('error', (err) => {
+    console.error('Error connecting to MongoDB:', err);
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,6 +21,18 @@ const PORT = process.env.PORT || 3000;
 const limiter = new rateLimiter({
   minTime: 1000
 });
+
+// Changed collection name from 'latestJobs' to 'jobListings'
+const Job = mongoose.model('Job', new mongoose.Schema({
+    companyName: String,
+    companyInfo: String,
+    jobDescription: String,
+    location: String,
+    listingDate: Date,
+    careersPage: String,
+    emails: [String],
+    scannedPages: [String]
+}, { collection: 'jobListings' }));
 
 async function fetchCompanyDetails(companyUrl) {
     try {
@@ -87,7 +106,7 @@ const limitedFetchEmails = limiter.wrap(fetchEmails);
 
 async function fetchJobListings(pageNumber) {
     try {
-        const apiUrl = process.env.ADUNA_API;
+        const apiUrl = process.env.ADZUNA_API;
         const response = await axios.get(apiUrl);
         
         return response.data.results.map(job => ({
@@ -129,35 +148,24 @@ async function searchCompanyWebsites(query, numResults = 5) {
     }
 }
 
-function saveToFile(data) {
-    let existingData = [];
-    if (fs.existsSync('job_data.json')) {
-        const fileContent = fs.readFileSync('job_data.json', 'utf8');
-        existingData = JSON.parse(fileContent);
+async function saveToMongo(dataArray) {
+    try {
+        for (const data of dataArray) {
+            const existingJob = await Job.findOne({ companyName: data.companyName, location: data.location });
+            if (!existingJob) {
+                const job = new Job(data);
+                await job.save();
+            } else {
+                console.log(`Job for ${data.companyName} at ${data.location} already exists in the database.`);
+            }
+        }
+        console.log('Job data saved to MongoDB successfully');
+    } catch (error) {
+        console.error(`Error saving job data to MongoDB: ${error.message}`);
     }
-    const updatedData = mergeNewJobs(existingData, data);
-    fs.writeFileSync('job_data.json', JSON.stringify(updatedData, null, 2));
 }
 
-function mergeNewJobs(existingData, newData) {
-    const mergedData = [...existingData];
-    newData.forEach(newJob => {
-        const existingJobIndex = mergedData.findIndex(job => 
-            job.companyName === newJob.companyName && 
-            job.jobDescription === newJob.jobDescription &&
-            job.location === newJob.location
-        );
-        if (existingJobIndex === -1) {
-            mergedData.push(newJob);
-        } else {
-            mergedData[existingJobIndex] = {
-                ...mergedData[existingJobIndex],
-                ...newJob
-            };
-        }
-    });
-    return mergedData;
-}
+
 
 const maxRetries = 3;
 async function fetchWithRetry(func, ...args) {
@@ -251,7 +259,7 @@ async function runJobSearch() {
                 allData.push(jobData);
             }
 
-            saveToFile(allData);
+            await saveToMongo(allData);
             await new Promise(resolve => setTimeout(resolve, 5000));
         }
 
@@ -264,7 +272,7 @@ async function main() {
     console.log('Starting job search process...');
     await pingWebService();
     console.log('Waiting for 1 minute before starting the job search...');
-    await new Promise(resolve => setTimeout(resolve, 60000));
+    await new Promise(resolve => setTimeout(resolve, 6000));
     await runJobSearch();
     console.log('Job search process completed.');
 }
