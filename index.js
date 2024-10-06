@@ -1,14 +1,20 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const fs = require('fs'); // Import fs to write data to a file
+const fs = require('fs');
 const rateLimiter = require('bottleneck');
+const express = require('express');
+const dotenv = require('dotenv');
 
-// Create a rate limiter instance
+dotenv.config();
+
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
 const limiter = new rateLimiter({
-  minTime: 1000 // Minimum time between requests in milliseconds
+  minTime: 1000
 });
 
-// Function to fetch company details
 async function fetchCompanyDetails(companyUrl) {
     try {
         const response = await axios.get(companyUrl, {
@@ -19,7 +25,6 @@ async function fetchCompanyDetails(companyUrl) {
         const html = response.data;
         const $ = cheerio.load(html);
 
-        // Extract company details
         const companyName = $('title').text();
         const careersPageLink = $('a').filter((i, el) => $(el).text().toLowerCase().includes('careers') || $(el).text().toLowerCase().includes('career')).attr('href');
 
@@ -33,7 +38,6 @@ async function fetchCompanyDetails(companyUrl) {
     }
 }
 
-// Function to fetch all email addresses from a page
 async function fetchEmails(url) {
     try {
         const response = await axios.get(url, {
@@ -46,10 +50,8 @@ async function fetchEmails(url) {
 
         const emails = new Set();
 
-        // More comprehensive regex for email addresses
         const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
 
-        // Search in all text nodes
         $('body').find('*').contents().each((_, element) => {
             if (element.type === 'text') {
                 const matches = element.data.match(emailRegex);
@@ -57,13 +59,11 @@ async function fetchEmails(url) {
             }
         });
 
-        // Search in mailto: links
         $('a[href^="mailto:"]').each((_, element) => {
             const email = $(element).attr('href').replace('mailto:', '');
             emails.add(email);
         });
 
-        // Filter out placeholder emails and image filenames
         const filteredEmails = Array.from(emails).filter(email => 
             !email.includes('example') && 
             !email.includes('placeholder') &&
@@ -82,22 +82,19 @@ async function fetchEmails(url) {
     }
 }
 
-// Use the limiter for API calls and web scraping
 const limitedFetchCompanyDetails = limiter.wrap(fetchCompanyDetails);
 const limitedFetchEmails = limiter.wrap(fetchEmails);
 
-// Function to fetch job listings from Adzuna API
 async function fetchJobListings(pageNumber) {
     try {
-        const apiUrl = `https://api.adzuna.com/v1/api/jobs/in/search/${pageNumber}?app_id=0d95e10e&app_key=9b0a9ce4c6fa0b7be1bf4cc14d760de7`;
+        const apiUrl = process.env.ADUNA_API;
         const response = await axios.get(apiUrl);
         
-        // Extract useful job details
         return response.data.results.map(job => ({
             companyName: job.company.display_name,
             jobDescription: job.description,
             location: job.location.display_name,
-            listingDate: job.created, // Add this line to include the listing date
+            listingDate: job.created,
         }));
     } catch (error) {
         console.error(`Error fetching job listings from Adzuna: ${error.message}`);
@@ -105,7 +102,6 @@ async function fetchJobListings(pageNumber) {
     }
 }
 
-// Function to search for company websites (Using DuckDuckGo as an alternative)
 async function searchCompanyWebsites(query, numResults = 5) {
     try {
         const searchUrl = `https://duckduckgo.com/html?q=${encodeURIComponent(query)}`;
@@ -118,7 +114,6 @@ async function searchCompanyWebsites(query, numResults = 5) {
         const $ = cheerio.load(response.data);
         const results = [];
 
-        // DuckDuckGo-specific scraping
         $('a.result__a').each((i, element) => {
             if (results.length >= numResults) return false;
             const link = $(element).attr('href');
@@ -127,12 +122,6 @@ async function searchCompanyWebsites(query, numResults = 5) {
             }
         });
 
-        if (results.length === 0) {
-            console.log('No results found. DuckDuckGo might be blocking the request.');
-        } else {
-            console.log('Search results:', results);
-        }
-
         return results;
     } catch (error) {
         console.error(`Error searching for company websites: ${error.message}`);
@@ -140,7 +129,6 @@ async function searchCompanyWebsites(query, numResults = 5) {
     }
 }
 
-// Function to save data to a JSON file
 function saveToFile(data) {
     let existingData = [];
     if (fs.existsSync('job_data.json')) {
@@ -151,7 +139,6 @@ function saveToFile(data) {
     fs.writeFileSync('job_data.json', JSON.stringify(updatedData, null, 2));
 }
 
-// Function to merge new jobs with existing data
 function mergeNewJobs(existingData, newData) {
     const mergedData = [...existingData];
     newData.forEach(newJob => {
@@ -163,7 +150,6 @@ function mergeNewJobs(existingData, newData) {
         if (existingJobIndex === -1) {
             mergedData.push(newJob);
         } else {
-            // Update existing job if needed
             mergedData[existingJobIndex] = {
                 ...mergedData[existingJobIndex],
                 ...newJob
@@ -173,7 +159,6 @@ function mergeNewJobs(existingData, newData) {
     return mergedData;
 }
 
-// Consider adding more robust error handling and retries
 const maxRetries = 3;
 async function fetchWithRetry(func, ...args) {
   for (let i = 0; i < maxRetries; i++) {
@@ -186,14 +171,23 @@ async function fetchWithRetry(func, ...args) {
   }
 }
 
-// Main function to run the automation
-(async () => {
-    let pageNumber = 55;
-    const maxPages = 65;
+async function pingWebService() {
+    try {
+        await axios.get(process.env.PROD || 'http://localhost:3000');
+        console.log('Web service pinged successfully');
+    } catch (error) {
+        console.error('Error pinging web service:', error.message);
+    }
+}
+
+async function runJobSearch() {
+    let pageNumber = 0;
+    const maxPages = 1;
 
     while (pageNumber <= maxPages) {
         const jobListings = await fetchWithRetry(fetchJobListings, pageNumber);
         const allData = [];
+        const scannedPages = [];
 
         for (const job of jobListings) {
             const { companyName, jobDescription, location, listingDate } = job;
@@ -201,37 +195,62 @@ async function fetchWithRetry(func, ...args) {
             
             const websites = await fetchWithRetry(searchCompanyWebsites, `${companyName} company website`);
 
+            let companyEmails = [];
             for (const website of websites) {
                 const companyDetails = await fetchWithRetry(limitedFetchCompanyDetails, website);
 
                 if (companyDetails) {
                     let emails = await fetchWithRetry(limitedFetchEmails, website);
+                    scannedPages.push(website);
+
                     if (companyDetails.careersPage) {
                         const careerEmails = await fetchWithRetry(limitedFetchEmails, companyDetails.careersPage);
                         emails = [...new Set([...emails, ...careerEmails])];
+                        scannedPages.push(companyDetails.careersPage);
                     }
-                    const jobData = {
-                        companyName: companyName,
-                        companyInfo: companyDetails.name,
-                        jobDescription,
-                        location,
-                        listingDate,
-                        careersPage: companyDetails.careersPage,
-                        emails: emails,
-                    };
-                    allData.push(jobData);
-                    console.log(`Company Name: ${companyName}`);
-                    console.log(`Company Info: ${companyDetails.name}`);
-                    console.log(`Job Description: ${jobDescription}`);
-                    console.log(`Location: ${location}`);
-                    console.log(`Listing Date: ${listingDate}`);
-                    console.log(`Website: ${website}`);
-                    console.log(`Careers Page: ${companyDetails.careersPage}`);
-                    console.log(`Emails: ${emails.join(', ')}`);
-                    console.log('---');
-                    break;
+
+                    companyEmails = [...new Set([...companyEmails, ...emails])];
+
+                    if (companyEmails.length > 0) {
+                        const jobData = {
+                            companyName: companyName,
+                            companyInfo: companyDetails.name,
+                            jobDescription,
+                            location,
+                            listingDate,
+                            careersPage: companyDetails.careersPage,
+                            emails: companyEmails,
+                            scannedPages: scannedPages
+                        };
+                        allData.push(jobData);
+                        console.log(`Company Name: ${companyName}`);
+                        console.log(`Company Info: ${companyDetails.name}`);
+                        console.log(`Job Description: ${jobDescription}`);
+                        console.log(`Location: ${location}`);
+                        console.log(`Listing Date: ${listingDate}`);
+                        console.log(`Website: ${website}`);
+                        console.log(`Careers Page: ${companyDetails.careersPage}`);
+                        console.log(`Emails: ${companyEmails.join(', ')}`);
+                        console.log(`Scanned Pages: ${scannedPages.join(', ')}`);
+                        console.log('---');
+                        break;
+                    }
                 }
             }
+
+            if (companyEmails.length === 0) {
+                console.log(`No emails found for ${companyName} after scanning all pages.`);
+                const jobData = {
+                    companyName: companyName,
+                    jobDescription,
+                    location,
+                    listingDate,
+                    emails: [],
+                    scannedPages: scannedPages
+                };
+                allData.push(jobData);
+            }
+
             saveToFile(allData);
             await new Promise(resolve => setTimeout(resolve, 5000));
         }
@@ -239,4 +258,34 @@ async function fetchWithRetry(func, ...args) {
         console.log(`Completed processing page ${pageNumber}`);
         pageNumber++;
     }
-})();
+}
+
+async function main() {
+    console.log('Starting job search process...');
+    await pingWebService();
+    console.log('Waiting for 1 minute before starting the job search...');
+    await new Promise(resolve => setTimeout(resolve, 60000));
+    await runJobSearch();
+    console.log('Job search process completed.');
+}
+
+// Set up Express routes
+app.get('/', (req, res) => {
+    res.status(200).send('Job Search Scraper is running');
+});
+
+app.get('/run', async (req, res) => {
+    res.send('Job search process started');
+    await main();
+});
+
+// Start the Express server
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
+
+// Run the main function every 24 hours
+setInterval(main, 24 * 60 * 60 * 1000);
+
+// Initial run
+main();
